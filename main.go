@@ -3,8 +3,8 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -12,16 +12,25 @@ import (
 
 var variables = make(map[string]int)
 
-// normalizeOperator reduces sequences of + and - into a single + or -
-func normalizeOperator(op string) string {
-	countMinus := strings.Count(op, "-")
-	if countMinus%2 == 0 {
-		return "+"
+// Operator precedence
+func precedence(op string) int {
+	switch op {
+	case "^":
+		return 3
+	case "*", "/":
+		return 2
+	case "+", "-":
+		return 1
 	}
-	return "-"
+	return 0
 }
 
-// isValidIdentifier checks if a variable name contains only Latin letters
+// Associativity: true if right-associative
+func isRightAssociative(op string) bool {
+	return op == "^"
+}
+
+// Check if valid identifier
 func isValidIdentifier(s string) bool {
 	for _, r := range s {
 		if !unicode.IsLetter(r) {
@@ -31,7 +40,7 @@ func isValidIdentifier(s string) bool {
 	return len(s) > 0
 }
 
-// resolveValue returns the integer value of a token (number or variable)
+// Resolve value: number or variable
 func resolveValue(token string) (int, error) {
 	if isNumber(token) {
 		return strconv.Atoi(token)
@@ -46,43 +55,151 @@ func resolveValue(token string) (int, error) {
 	return 0, fmt.Errorf("Invalid identifier")
 }
 
-// isNumber checks if a string can be parsed as an integer
+// Check if number
 func isNumber(s string) bool {
 	_, err := strconv.Atoi(s)
 	return err == nil
 }
 
-// evaluateExpression parses and evaluates an expression with + and - operators
-func evaluateExpression(expr string) (int, error) {
-	tokens := strings.Fields(expr)
-	if len(tokens) == 0 {
-		return 0, fmt.Errorf("empty expression")
-	}
+// Convert infix to postfix using Shunting Yard
+func infixToPostfix(expr string) ([]string, error) {
+	// Normalize operators like +++ or ---
+	expr = normalizeOperators(expr)
 
-	result := 0
-	sign := "+"
+	tokens := tokenize(expr)
+	output := []string{}
+	stack := []string{}
+
 	for _, token := range tokens {
-		// Operator sequence
-		if strings.ContainsAny(token, "+-") && !isNumber(token) && !isValidIdentifier(token) {
-			sign = normalizeOperator(token)
-			continue
-		}
-
-		// Number or variable
-		val, err := resolveValue(token)
-		if err != nil {
-			return 0, err
-		}
-		if sign == "+" {
-			result += val
+		if isNumber(token) || isValidIdentifier(token) {
+			output = append(output, token)
+		} else if token == "(" {
+			stack = append(stack, token)
+		} else if token == ")" {
+			foundLeft := false
+			for len(stack) > 0 {
+				top := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if top == "(" {
+					foundLeft = true
+					break
+				}
+				output = append(output, top)
+			}
+			if !foundLeft {
+				return nil, fmt.Errorf("Invalid expression")
+			}
+		} else if token == "+" || token == "-" || token == "*" || token == "/" || token == "^" {
+			// Invalid sequences of * or /
+			if strings.Contains(token, "**") || strings.Contains(token, "//") {
+				return nil, fmt.Errorf("Invalid expression")
+			}
+			for len(stack) > 0 {
+				top := stack[len(stack)-1]
+				if precedence(top) > precedence(token) ||
+					(precedence(top) == precedence(token) && !isRightAssociative(token)) {
+					output = append(output, top)
+					stack = stack[:len(stack)-1]
+				} else {
+					break
+				}
+			}
+			stack = append(stack, token)
 		} else {
-			result -= val
+			return nil, fmt.Errorf("Invalid expression")
 		}
 	}
-	return result, nil
+
+	for len(stack) > 0 {
+		top := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if top == "(" || top == ")" {
+			return nil, fmt.Errorf("Invalid expression")
+		}
+		output = append(output, top)
+	}
+	return output, nil
 }
 
-// handleAssignment processes variable assignment
+// Tokenize expression (split into numbers, variables, operators, parentheses)
+func tokenize(expr string) []string {
+	// Add spaces around operators and parentheses
+	replacer := strings.NewReplacer(
+		"(", " ( ",
+		")", " ) ",
+		"+", " + ",
+		"-", " - ",
+		"*", " * ",
+		"/", " / ",
+		"^", " ^ ",
+	)
+	expr = replacer.Replace(expr)
+	return strings.Fields(expr)
+}
+
+// Normalize sequences of + and -
+func normalizeOperators(expr string) string {
+	// Replace sequences of + with single +
+	expr = strings.ReplaceAll(expr, "++", "+")
+	// Replace sequences of -- with +
+	for strings.Contains(expr, "--") {
+		expr = strings.ReplaceAll(expr, "--", "+")
+	}
+	// Replace sequences of +- or -+ with -
+	for strings.Contains(expr, "+-") {
+		expr = strings.ReplaceAll(expr, "+-", "-")
+	}
+	for strings.Contains(expr, "-+") {
+		expr = strings.ReplaceAll(expr, "-+", "-")
+	}
+	return expr
+}
+
+// Evaluate postfix expression
+func evaluatePostfix(postfix []string) (int, error) {
+	stack := []int{}
+	for _, token := range postfix {
+		if isNumber(token) || isValidIdentifier(token) {
+			val, err := resolveValue(token)
+			if err != nil {
+				return 0, err
+			}
+			stack = append(stack, val)
+		} else {
+			if len(stack) < 2 {
+				return 0, fmt.Errorf("Invalid expression")
+			}
+			b := stack[len(stack)-1]
+			a := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
+			var res int
+			switch token {
+			case "+":
+				res = a + b
+			case "-":
+				res = a - b
+			case "*":
+				res = a * b
+			case "/":
+				if b == 0 {
+					return 0, fmt.Errorf("Division by zero")
+				}
+				res = a / b
+			case "^":
+				res = int(math.Pow(float64(a), float64(b)))
+			default:
+				return 0, fmt.Errorf("Invalid expression")
+			}
+			stack = append(stack, res)
+		}
+	}
+	if len(stack) != 1 {
+		return 0, fmt.Errorf("Invalid expression")
+	}
+	return stack[0], nil
+}
+
+// Handle assignment
 func handleAssignment(line string) {
 	parts := strings.Split(line, "=")
 	if len(parts) != 2 {
@@ -92,13 +209,11 @@ func handleAssignment(line string) {
 	left := strings.TrimSpace(parts[0])
 	right := strings.TrimSpace(parts[1])
 
-	// Validate left side
 	if !isValidIdentifier(left) {
 		fmt.Println("Invalid identifier")
 		return
 	}
 
-	// Right side can be number or variable
 	if isNumber(right) {
 		val, _ := strconv.Atoi(right)
 		variables[left] = val
@@ -125,37 +240,26 @@ func main() {
 		}
 		line := strings.TrimSpace(scanner.Text())
 
-		// Exit command
 		if line == "/exit" {
 			fmt.Println("Bye!")
 			break
 		}
-
-		// Help command
 		if line == "/help" {
-			fmt.Println("The program calculates expressions with addition (+) and subtraction (-).")
-			fmt.Println("It also supports storing values in variables.")
+			fmt.Println("The program supports +, -, *, /, ^ and parentheses ().")
+			fmt.Println("It also supports variables and unary minus.")
 			continue
 		}
-
-		// Ignore empty lines
 		if line == "" {
 			continue
 		}
-
-		// Unknown command
 		if strings.HasPrefix(line, "/") {
 			fmt.Println("Unknown command")
 			continue
 		}
-
-		// Assignment
 		if strings.Contains(line, "=") {
 			handleAssignment(line)
 			continue
 		}
-
-		// Single variable
 		if isValidIdentifier(line) {
 			val, ok := variables[line]
 			if !ok {
@@ -166,22 +270,16 @@ func main() {
 			continue
 		}
 
-		// Expression
-		if !isValidExpression(line) {
+		postfix, err := infixToPostfix(line)
+		if err != nil {
 			fmt.Println("Invalid expression")
 			continue
 		}
-		result, err := evaluateExpression(line)
+		result, err := evaluatePostfix(postfix)
 		if err != nil {
-			fmt.Println(err.Error())
+			fmt.Println("Invalid expression")
 			continue
 		}
 		fmt.Println(result)
 	}
-}
-
-// isValidExpression checks if the expression contains only digits, spaces, +, -, or identifiers
-func isValidExpression(expr string) bool {
-	re := regexp.MustCompile(`^[A-Za-z0-9+\-\s]+$`)
-	return re.MatchString(expr)
 }
